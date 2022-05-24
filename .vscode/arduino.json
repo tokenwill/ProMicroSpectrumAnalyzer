@@ -1,0 +1,6 @@
+{
+    "board": "arduino:avr:leonardo",
+    "programmer": "arduino:usbtinyisp",
+    "sketch": "ProMicroSpectrumAnalyzer.ino",
+    "port": "COM5"
+}
