@@ -1,59 +1,54 @@
 // (Heavily) adapted from https://github.com/G6EJD/ESP32-8266-Audio-Spectrum-Display/blob/master/ESP32_Spectrum_Display_02.ino
 // Adjusted to allow brightness changes on press+hold, Auto-cycle for 3 button presses within 2 seconds
 // Edited to add Neomatrix support for easier compatibility with different layouts.
+// Code adapted from Scott.
 
 #include <FastLED_NeoMatrix.h>
 #include <arduinoFFT.h>
 #include <EasyButton.h>
 
-#define SAMPLES         64          // Must be a power of 2
-#define SAMPLING_FREQ   20000         // Hz, must be 40000 or less due to ADC conversion time. Determines maximum frequency that can be analysed by the FFT Fmax=sampleF/2.
-#define AMPLITUDE       16          // Depending on your audio source level, you may need to alter this value. Can be used as a 'sensitivity' control.
-//#define AUDIO_IN_PIN    A0            // Signal in on this pin
+
+// LED/Button Stuff
+
 #define LED_PIN         3             // LED strip data
-#define BTN_PIN         2             // Connect a push button to this pin to change patterns
-#define LONG_PRESS_MS   200           // Number of ms to count as a long press
 #define COLOR_ORDER     GRB           // If colours look wrong, play with this
 #define CHIPSET         WS2812B       // LED strip type
-//#define MAX_MILLIAMPS   500          // Careful with the amount of power here if running off USB port
-//const int BRIGHTNESS_SETTINGS[3] = {25, 25, 35};  // 3 Integer array for 3 brightness settings (based on pressing+holding BTN_PIN)
-#define NUM_BANDS       8            // To change this, you will need to change the bunch of if statements describing the mapping from bins to bands
-const uint8_t kMatrixWidth = 8;                          // Matrix width
-const uint8_t kMatrixHeight = 8;                         // Matrix height
+#define NUM_BANDS       8             // To change this, you will need to change the bunch of if statements describing the mapping from bins to bands
+const uint8_t kMatrixWidth = 8;                           // Matrix width
+const uint8_t kMatrixHeight = 8;                          // Matrix height
 #define NUM_LEDS       (kMatrixWidth * kMatrixHeight)     // Total number of LEDs
 #define BAR_WIDTH      (kMatrixWidth  / (NUM_BANDS - 1))  // If width >= 8 light 1 LED width per bar, >= 16 light 2 LEDs width bar etc
 #define TOP            (kMatrixHeight - 0)                // Don't allow the bars to go offscreen
 #define SERPENTINE     true                               // Set to false if you're LEDS are connected end to end, true if serpentine
 
+// Button stuff
+#define BTN_PIN         2             // Connect a push button to this pin to change patterns
+#define LONG_PRESS_MS   200           // Number of ms to count as a long press
+int buttonPushCounter = 0;
+bool autoChangePatterns = false;
+EasyButton modeBtn(BTN_PIN);
 
-//#define MIC_PIN    A0                                        // Microphone, or A0 on a WeMOS D1 Mini.
-#define DC_OFFSET  370                                      // DC offset in mic signal. I subtract this value from the raw sample.
 
+// Sampling and FFT stuff
+#define AMPLITUDE       16            // Depending on your audio source level, you may need to alter this value. Can be used as a 'sensitivity' control.
+#define SAMPLES         64            // Must be a power of 2
+#define DC_OFFSET       370                                   // DC offset in mic signal. I subtract this value from the raw sample.
+#define SAMPLING_FREQ   20000         // Hz, must be 40000 or less due to ADC conversion time. Determines maximum frequency that can be analysed by the FFT Fmax=sampleF/2.
 int sample;
 int sampleAgc, multAgc;
 bool samplePeak = 0;                                          // Boolean flag for peak. Responding routine must reset this flag.
 float sampleAvg = 0;                                          // Smoothed Average.
-//int16_t micLev;                                           // Here, we subtract the offset, so this should be 16 bit signed.
 uint8_t maxVol = 11;                                          // Reasonable value for constant volume for 'peak detector', as it won't always trigger.
-uint8_t squelch = 50;                                          // Anything below this is background noise, so we'll make it '0'.
+uint8_t squelch = 50;                                         // Anything below this is background noise, so we'll make it '0'.
 uint8_t targetAgc = 60;                                       // This is our setPoint at 20% of max for the adjusted output.
-// Params for width and height
-
-// Sampling and FFT stuff
-//unsigned int sampling_period_us;
+double vReal[SAMPLES];
+double vImag[SAMPLES];
+unsigned long newTime;
 byte peak[] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};              // The length of these arrays must be >= NUM_BANDS
 int oldBarHeights[] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 int bandValues[] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-double vReal[SAMPLES];
-double vImag[SAMPLES];
-double fftBin[SAMPLES];
-unsigned long newTime;
 arduinoFFT FFT = arduinoFFT(vReal, vImag, SAMPLES, SAMPLING_FREQ);
 
-// Button stuff
-int buttonPushCounter = 0;
-bool autoChangePatterns = false;
-EasyButton modeBtn(BTN_PIN);
 
 // FastLED stuff
 CRGB leds[NUM_LEDS];
@@ -89,15 +84,17 @@ FastLED_NeoMatrix *matrix = new FastLED_NeoMatrix(leds, kMatrixWidth, kMatrixHei
   NEO_TILE_TOP + NEO_TILE_LEFT + NEO_TILE_ROWS);
 
 void setup() {
-  Serial.begin(115200);
+  //Serial.begin(115200);
   FastLED.addLeds<CHIPSET, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalSMD5050);
   FastLED.setMaxPowerInVoltsAndMilliamps(5, 500);
   FastLED.setBrightness(30);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
   FastLED.clear();
+  FastLED.show();
 
-  ADCSRA = 0xE5;      // set ADC to free running mode and set pre-scalar to 32 (0xe5)
-  ADMUX  = 0x47;;       // use pin A0 and external voltage reference
-  DIDR0  = 0x80;       // use pin A0 and external voltage reference
+  ADCSRA = 0xe5;       // set ADC to free running mode and set pre-scalar to 32 (0xe5)
+  ADMUX  = 0x47;       // use pin A0 and external voltage reference
+  DIDR0  = 0x80;       // Turn off input for A0
 }
 
 void changeMode() {
@@ -355,17 +352,14 @@ void getFFT() {
 
   // Sample the audio pin
   for (int i = 0; i < SAMPLES; i++) {
-    //newTime = micros();
     getSample();
     vReal[i] = sample;
     vImag[i] = 0;
-    //while ((micros() - newTime) < sampling_period_us) { /* chill */ }
   }
 
   // Compute FFT
-//  FFT.DCRemoval();
   FFT.Windowing( FFT_WIN_TYP_FLT_TOP, FFT_FORWARD );         // Flat Top Window - better amplitude accuracy
-//  FFT.Windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+  //FFT.Windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
   FFT.Compute(FFT_FORWARD);
   FFT.ComplexToMagnitude();
 }
